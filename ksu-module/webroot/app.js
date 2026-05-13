@@ -8,7 +8,6 @@ const files = {
 	service: `${MODDIR}/service.sh`,
 };
 
-let ksuApi = null;
 let apps = [];
 let selectedPackages = new Set();
 
@@ -18,25 +17,52 @@ const appList = $("#appList");
 const statusText = $("#statusText");
 const toast = $("#toast");
 
-try {
-	ksuApi = await import("kernelsu");
-} catch {
-	ksuApi = null;
-}
-
 function shellQuote(value) {
 	return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-async function execShell(command) {
-	if (!ksuApi?.exec) {
-		throw new Error("KernelSU WebUI API is not available");
+function getKsuBridge() {
+	if (typeof window !== "undefined" && window.ksu?.exec) {
+		return window.ksu;
 	}
-	const result = await ksuApi.exec(command);
-	if (result.errno && result.errno !== 0) {
-		throw new Error(result.stderr || result.stdout || `Command failed: ${result.errno}`);
+
+	if (typeof ksu !== "undefined" && ksu?.exec) {
+		return ksu;
 	}
-	return result.stdout || "";
+
+	return null;
+}
+
+function execShell(command) {
+	const bridge = getKsuBridge();
+	if (!bridge) {
+		throw new Error("KernelSU bridge is not available");
+	}
+
+	return new Promise((resolve, reject) => {
+		const callbackName = `nohello_exec_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+		window[callbackName] = (errno, stdout, stderr) => {
+			delete window[callbackName];
+			if (errno && errno !== 0) {
+				reject(new Error(stderr || stdout || `Command failed: ${errno}`));
+				return;
+			}
+			resolve(stdout || "");
+		};
+
+		try {
+			bridge.exec(command, JSON.stringify({}), callbackName);
+		} catch (error) {
+			try {
+				bridge.exec(command, callbackName);
+			} catch (fallbackError) {
+				delete window[callbackName];
+				reject(fallbackError);
+				return;
+			}
+		}
+	});
 }
 
 function showToast(message) {
@@ -210,8 +236,7 @@ for (const radio of document.querySelectorAll('input[name="scope"]')) {
 	});
 }
 
-await refreshConfig().catch((error) => {
+refreshConfig().catch((error) => {
 	statusText.textContent = "Read failed";
 	showToast(error.message);
 });
-
